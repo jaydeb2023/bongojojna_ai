@@ -1,97 +1,150 @@
-import { SCHEMES } from '../data/schemes';
+// utils/matcher.js - OpenAI AI + Live schemes
+let cachedSchemes = [];
+let cacheTime = 0;
 
-const SCHEME_LIST_FOR_AI = SCHEMES.map(s =>
-  `ID:${s.id} | নাম:${s.name} | ক্যাটাগরি:${s.category} | যোগ্যতা:${s.eligibility.join(', ')}`
-).join('\n');
-
-export async function matchSchemesAI(transcript, apiKey, profile = {}) {
-  if (!transcript) return { schemes: [], message: null };
-
-  const profileText = Object.keys(profile).length > 0
-    ? `লিঙ্গ=${profile.gender||'অজানা'}, বয়স=${profile.ageGroup||'অজানা'}, পেশা=${profile.occupation||'অজানা'}, জেলা=${profile.district||'অজানা'}`
-    : '';
-
-  const systemPrompt = `তুমি পশ্চিমবঙ্গ সরকারি স্কিম বিশেষজ্ঞ।
-
-উপলব্ধ স্কিম:
-${SCHEME_LIST_FOR_AI}
-
-শুধু এই JSON format এ উত্তর দাও, অন্য কিছু লিখবে না:
-{"matched_ids":[1,2],"understood":"১ লাইন বাংলায়","message":null}
-
-যদি কোনো স্কিম না মেলে:
-{"matched_ids":[],"understood":"সারাংশ","message":"দুঃখিত, এই বিষয়ে আমাদের কাছে এখনো স্কিম নেই।"}
-
-নিয়ম:
-- এলাকা/পঞ্চায়েত/অঞ্চল/গ্রাম/ব্লক/location → সব ID [1,2,3,4,5,6,7,8]
-- কৃষক/জমি/চাষ/ধান/ফসল → [2,3,5]
-- বিধবা → [4,5]
-- মহিলা/মেয়ে/নারী → [1,4,5]
-- ছাত্র/পড়া/স্কুল/কলেজ/বিশ্ববিদ্যালয় → [6,8,5]
-- বয়স্ক/বৃদ্ধ/৬০/৬৫/৭০ → [7,5]
-- স্বাস্থ্য/হাসপাতাল/চিকিৎসা/অসুস্থ → [5]
-- গরিব/বিপিএল → [1,2,4,5,7]
-- সবসময় ID 5 রাখো`;
-
-  try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        max_tokens: 200,
-        temperature: 0,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: `"${transcript}" ${profileText}` }
-        ],
-      }),
-    });
-
-    const data = await res.json();
-    const raw = data.choices[0].message.content.replace(/```json|```/g, '').trim();
-    const parsed = JSON.parse(raw);
-
-    return {
-      schemes: SCHEMES
-        .filter(s => parsed.matched_ids?.includes(s.id))
-        .map(s => ({ ...s, score: 10 })),
-      understood: parsed.understood || null,
-      message: parsed.message || null,
-    };
-
-  } catch (err) {
-    console.error('OpenAI error:', err);
-    // API fail হলে keyword fallback
-    return {
-      schemes: fallbackMatch(transcript),
-      understood: null,
-      message: null,
-    };
+export async function matchSchemesAI(text, apiKey) {
+  // Cache schemes 24hr
+  const now = Date.now();
+  if (!cachedSchemes.length || now - cacheTime > 24 * 60 * 60 * 1000) {
+    cachedSchemes = await fetchLiveSchemes();
+    cacheTime = now;
   }
-}
 
-// API fail হলে এটা কাজ করবে
-function fallbackMatch(transcript) {
-  const text = transcript.toLowerCase();
-  return SCHEMES.filter(s => {
-    if (text.includes('কৃষক') || text.includes('জমি')) return s.category === 'কৃষক';
-    if (text.includes('বিধবা')) return s.category === 'বিধবা';
-    if (text.includes('ছাত্র') || text.includes('পড়া')) return s.category === 'ছাত্র';
-    if (text.includes('বয়স্ক') || text.includes('বৃদ্ধ')) return s.category === 'বয়স্ক';
-    return s.id === 5;
-  }).map(s => ({ ...s, score: 5 }));
+  const profile = parseUserProfile(text);
+  const matched = await openaiMatch(profile, cachedSchemes, apiKey);
+  
+  return {
+    schemes: matched.slice(0, 8),
+    understood: `${profile.age || '?'} বছর, ${profile.gender || 'অজানা'}, ${profile.location || 'অজানা'}, ${profile.occupation || ''}`.trim(),
+    message: getAIMessage(profile, matched)
+  };
 }
 
 export function calcTotalBenefits(schemes) {
-  return schemes.reduce((sum, s) => sum + s.amountNum, 0);
+  return schemes.reduce((total, scheme) => {
+    return total + (scheme.amount || 0);
+  }, 0);
 }
 
-export function formatBengaliNumber(num) {
-  if (num >= 100000) return `${(num / 100000).toFixed(1)} লক্ষ`;
-  if (num >= 1000) return `${(num / 1000).toFixed(1)} হাজার`;
-  return num.toString();
+// OpenAI GPT-4o-mini দিয়ে intelligent matching
+async function openaiMatch(profile, schemes, apiKey) {
+  const prompt = `
+তোমার কাজ: ব্যবহারকারীর প্রোফাইলের সাথে স্কিম ম্যাচ করো।
+
+ব্যবহারকারী: ${JSON.stringify(profile)}
+স্কিমস (৫০টি): ${JSON.stringify(schemes.slice(0, 50))}
+
+নিয়ম:
+1. বয়স, লিঙ্গ, লোকেশন, পেশা ম্যাচ করো
+2. প্রতিটি স্কিমের score দাও (0.1-1.0)
+3. শুধুমাত্র relevant স্কিম রাখো
+4. WB + Central schemes prioritize করো
+
+ফরম্যাট (JSON array):
+[
+  {"id": 1, "name": "লক্ষ্মীর ভাণ্ডার", "score": 0.95, "reason": "বিধবা মহিলা"},
+  ...
+]
+
+শুধু JSON দাও, কোন explanation নয়।
+`;
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',  // সস্তা + দ্রুত
+        messages: [{ role: 'user', content: prompt }],
+        max_tokens: 2000,
+        temperature: 0.1
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const aiResponse = data.choices[0].message.content;
+    
+    // JSON extract করো
+    const jsonMatch = aiResponse.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      return JSON.parse(jsonMatch[0]);
+    }
+    
+    return fallbackMatch(profile, schemes);
+  } catch (error) {
+    console.error('OpenAI failed:', error);
+    return fallbackMatch(profile, schemes);
+  }
+}
+
+function fallbackMatch(profile, schemes) {
+  return schemes
+    .filter(scheme => {
+      const score = calculateScore(profile, scheme);
+      return score > 0.3;
+    })
+    .sort((a, b) => (b.score || 0) - (a.score || 0))
+    .slice(0, 8)
+    .map(scheme => ({
+      ...scheme,
+      score: calculateScore(profile, scheme)
+    }));
+}
+
+function parseUserProfile(text) {
+  const lowerText = text.toLowerCase();
+  
+  // বয়স
+  const ageMatch = lowerText.match(/(\d{1,2})\s*(বছর|বছোর|year|yrs)/);
+  const age = ageMatch ? parseInt(ageMatch[1]) : null;
+  
+  // লিঙ্গ
+  const genderMatch = lowerText.match(/(মহিলা|মেয়ে|বিধবা|ছেলে|পুরুষ|মানুষ)/i);
+  const gender = genderMatch ? genderMatch[1] : null;
+  
+  // লোকেশন
+  const locationMatch = lowerText.match(/(মালদা|বর্ধমান|হাওড়া|কলকাতা|দমদম|পূর্ববর্ধমান|মুর্শিদাবাদ)/i);
+  const location = locationMatch ? locationMatch[1] : null;
+  
+  // পেশা
+  const occupation = lowerText.includes('কৃষক') ? 'কৃষক' :
+                    lowerText.includes('ছাত্র') ? 'ছাত্র' :
+                    lowerText.includes('মেয়ে') ? 'ছাত্রী' : null;
+
+  return {
+    age,
+    gender,
+    location,
+    occupation,
+    rawText: text
+  };
+}
+
+function getAIMessage(profile, matched) {
+  if (matched.length === 0) {
+    return 'আরো বিস্তারিত তথ্য দিন (যেমন: বয়স, জমির পরিমাণ, পরিবারের আয়)';
+  }
+  
+  if (profile.age && profile.age > 60) {
+    return '৬০+ বয়সের জন্য বেশি সুবিধা আছে! আবেদন করুন।';
+  }
+  
+  return null;
+}
+
+function calculateScore(profile, scheme) {
+  let score = 0;
+  
+  if (profile.gender === 'মহিলা' && scheme.category?.includes('women')) score += 0.4;
+  if (profile.occupation === 'কৃষক' && scheme.category?.includes('farmer')) score += 0.5;
+  if (profile.age && profile.age > 60 && scheme.eligibility?.includes('বৃদ্ধ')) score += 0.3;
+  
+  return Math.min(score, 1.0);
 }
