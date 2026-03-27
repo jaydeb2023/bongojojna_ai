@@ -24,13 +24,13 @@ export default async function handler(req, res) {
 
   // ── Source 1: myScheme.gov.in (সব page) ─────────────────
   try {
-    const pages = [1, 2, 3, 4, 5]; // 50 per page = 250 schemes
+    const pages = Array.from({ length: 90 }, (_, i) => i + 1);// 50 per page = 250 schemes
     for (const page of pages) {
       try {
         const r = await fetch(
-          `https://api.myscheme.gov.in/search/v4/schemes?lang=en&state=West%20Bengal&page=${page}&size=50`,
-          { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) }
-        );
+  `https://api.myscheme.gov.in/search/v4/schemes?lang=en&page=${page}&size=50`,
+  { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) }
+);
         if (!r.ok) break;
         const d = await r.json();
         const items = d?.data?.schemes || d?.schemes || d?.results || [];
@@ -40,7 +40,7 @@ export default async function handler(req, res) {
     }
 
     // Central schemes (PM schemes applicable to WB)
-    const centralPages = [1, 2, 3];
+    const centralPages = Array.from({ length: 10 }, (_, i) => i + 1);
     for (const page of centralPages) {
       try {
         const r = await fetch(
@@ -61,7 +61,7 @@ export default async function handler(req, res) {
   // ── Source 2: API Setu ────────────────────────────────────
   try {
     const r = await fetch(
-      'https://api.setu.co.in/public/v2/schemes?state=WB&size=100',
+      'https://api.setu.co.in/public/v2/schemes?size=300'
       { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(8000) }
     );
     if (r.ok) {
@@ -91,7 +91,7 @@ export default async function handler(req, res) {
   // ── Deduplicate by name ───────────────────────────────────
   const seen = new Set();
   const unique = allSchemes.filter(s => {
-    const key = s.name?.toLowerCase().trim();
+    const key = (s.name + s.description).toLowerCase().trim();
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
