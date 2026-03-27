@@ -31,10 +31,11 @@ export default async function handler(req, res) {
   `https://api.myscheme.gov.in/search/v4/schemes?lang=en&page=${page}&size=50`,
   { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(8000) }
 );
-        if (!r.ok) break;
+        if (!r.ok) continue;
         const d = await r.json();
-        const items = d?.data?.schemes || d?.schemes || d?.results || [];
-        if (!items.length) break;
+       const items = d?.data?.schemes || d?.schemes || d?.results || [];
+if (!Array.isArray(items)) continue;
+        if (!items.length) continue;
         items.forEach(s => allSchemes.push(normalizeMyScheme(s, 'myscheme-wb')));
       } catch { break; }
     }
@@ -62,7 +63,7 @@ export default async function handler(req, res) {
   try {
     const r = await fetch(
       'https://api.setu.co.in/public/v2/schemes?size=300'
-      { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(8000) }
+       { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(8000) }
     );
     if (r.ok) {
       const d = await r.json();
