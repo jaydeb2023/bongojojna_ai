@@ -1,121 +1,126 @@
-// utils/matcher.js - COMPLETE WORKING VERSION
-let cachedSchemes = [];
-let cacheTime = 0;
+// src/utils/matcher.js
 
+// Live schemes cache
+let liveSchemes = [];
+let schemesFetchedAt = 0;
+const CACHE_MS = 6 * 60 * 60 * 1000;
+
+// ── Fetch live schemes from Vercel API ───────────────────
+export async function fetchSchemes() {
+  if (liveSchemes.length && Date.now() - schemesFetchedAt < CACHE_MS) {
+    return liveSchemes;
+  }
+  try {
+    const res = await fetch('/api/schemes');
+    const data = await res.json();
+    liveSchemes = data.schemes || [];
+    schemesFetchedAt = Date.now();
+    console.log(`✅ Loaded ${liveSchemes.length} schemes (${data.source})`);
+    return liveSchemes;
+  } catch (e) {
+    console.error('fetchSchemes failed:', e);
+    return liveSchemes;
+  }
+}
+
+// ── Main AI matcher ──────────────────────────────────────
 export async function matchSchemesAI(text, apiKey) {
-  console.log('🔍 Voice input:', text);
+  if (!text) return { schemes: [], understood: null, message: null };
 
-  // Guaranteed schemes (no API dependency)
-  if (!cachedSchemes.length) {
-    cachedSchemes = loadGuaranteedSchemes();
-    console.log('📦 Loaded 20+ schemes');
+  // 1. Get live schemes
+  const schemes = await fetchSchemes();
+  if (!schemes.length) {
+    return { schemes: [], understood: null, message: 'স্কিম লোড হচ্ছে, একটু অপেক্ষা করুন।' };
   }
 
-  const profile = parseUserProfile(text);
-  console.log('👤 Parsed profile:', profile);
+  // 2. Build scheme summary for OpenAI
+  const schemeList = schemes.map(s =>
+    `ID:${s.id}|${s.name}|${s.category}|${s.eligibility?.join?.(',') || ''}|${s.amount}`
+  ).join('\n');
 
-  let matched;
-  try {
-    matched = await openaiMatch(profile, cachedSchemes.slice(0, 15), apiKey);
-    console.log('🤖 OpenAI matched:', matched);
-  } catch (error) {
-    console.log('❌ OpenAI failed, using fallback');
-    matched = fallbackMatch(profile);
-  }
+  const systemPrompt = `তুমি পশ্চিমবঙ্গ সরকারি স্কিম বিশেষজ্ঞ। ব্যবহারকারী বাংলায় কথা বলে।
 
-  // Ensure minimum 3 schemes
-  if (matched.length === 0) {
-    matched = getTop3Fallbacks(profile);
-  }
+উপলব্ধ স্কিম:
+${schemeList}
 
-  return {
-    schemes: matched.slice(0, 8),
-    understood: `${profile.age || '?'} বছর ${profile.gender || ''} ${profile.location || 'WB'}`.trim(),
-    message: matched.length ? null : 'বেশি বিস্তারিত বলুন (বয়স, গ্রাম, কাজ)'
-  };
-}
+নিয়ম:
+- এলাকা/পঞ্চায়েত/অঞ্চল/গ্রাম/ব্লক/location জিজ্ঞেস করলে → সেই এলাকার সব প্রযোজ্য স্কিম দেখাও
+- নির্দিষ্ট ব্যক্তি (বিধবা/কৃষক/ছাত্র/বয়স্ক) → শুধু তার স্কিম
+- কোনো স্কিম না থাকলে message এ বাংলায় জানাও
+- সবসময় স্বাস্থ্যসাথী (ID:5) রাখো
 
-export function calcTotalBenefits(schemes) {
-  return schemes.reduce((total, s) => total + (s.amount || 0), 0);
-}
+শুধু এই JSON দাও, অন্য কিছু না:
+{"matched_ids":[1,2,5],"understood":"এক লাইন বাংলায়","message":null}
 
-// ✅ SIMPLIFIED OpenAI (Error-proof)
-async function openaiMatch(profile, schemes, apiKey) {
-  const prompt = `Profile: ${JSON.stringify(profile)}
-Schemes: ${schemes.map(s => s.name).join(', ')}
-Return JSON: [{"id":1,"score":0.9},{"id":2,"score":0.8}] ONLY`;
+স্কিম না থাকলে:
+{"matched_ids":[],"understood":"সারাংশ","message":"দুঃখিত, এই বিষয়ে আমাদের কাছে এখনো কোনো স্কিম নেই। তবে স্বাস্থ্যসাথীর জন্য আবেদন করতে পারেন।"}`;
 
   try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
+        'Content-Type': 'application/json',
         'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         model: 'gpt-4o-mini',
-        messages: [{ role: 'user', content: prompt }],
-        max_tokens: 500,
-        temperature: 0
-      })
+        max_tokens: 300,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `"${text}"` },
+        ],
+      }),
     });
 
-    const data = await response.json();
-    const content = data.choices[0]?.message?.content || '[]';
-    
-    // Extract JSON safely
-    const jsonStart = content.indexOf('[');
-    const jsonEnd = content.lastIndexOf(']');
-    if (jsonStart !== -1 && jsonEnd !== -1) {
-      try {
-        return JSON.parse(content.slice(jsonStart, jsonEnd + 1));
-      } catch {
-        return [];
-      }
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message);
+
+    const raw = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(raw);
+
+    const matched = schemes.filter(s => parsed.matched_ids?.includes(s.id));
+
+    // যদি কোনো match না হয়
+    if (matched.length === 0 && !parsed.message) {
+      parsed.message = 'এই বিষয়ে নির্দিষ্ট স্কিম পাইনি। আরও বিস্তারিত বলুন — যেমন বয়স, পেশা, জেলা।';
     }
-    
-    return [];
-  } catch (error) {
-    console.error('OpenAI Error:', error.message);
-    return [];
+
+    return {
+      schemes: matched,
+      understood: parsed.understood || null,
+      message: parsed.message || null,
+    };
+
+  } catch (err) {
+    console.error('OpenAI error:', err.message);
+    // Fallback
+    return {
+      schemes: fallback(text, schemes),
+      understood: null,
+      message: null,
+    };
   }
 }
 
-// ✅ Fallback matching (Always works)
-function fallbackMatch(profile) {
-  const schemes = loadGuaranteedSchemes();
-  return schemes.map(scheme => ({
-    ...scheme,
-    score: getFallbackScore(profile, scheme)
-  })).slice(0, 6);
+// ── Keyword fallback যদি OpenAI fail করে ────────────────
+function fallback(text, schemes) {
+  const t = text.toLowerCase();
+  const isLocation = t.includes('পঞ্চায়েত') || t.includes('অঞ্চল') || t.includes('গ্রাম') || t.includes('এলাকা') || t.includes('ব্লক');
+  if (isLocation) return schemes;
+
+  return schemes.filter(s => {
+    const cat = s.category || '';
+    if ((t.includes('বিধবা')) && cat === 'বিধবা') return true;
+    if ((t.includes('কৃষক') || t.includes('জমি') || t.includes('চাষ')) && cat === 'কৃষক') return true;
+    if ((t.includes('ছাত্র') || t.includes('পড়া') || t.includes('স্কুল')) && cat === 'ছাত্র') return true;
+    if ((t.includes('বয়স্ক') || t.includes('বৃদ্ধ')) && cat === 'বয়স্ক') return true;
+    if ((t.includes('মহিলা') || t.includes('মেয়ে')) && cat === 'মহিলা') return true;
+    if (s.id === 5) return true;
+    return false;
+  });
 }
 
-function getTop3Fallbacks(profile) {
-  return [
-    { id: 3, name: 'স্বাস্থ্য সাথী', amount: 500000, score: 1.0 },
-    { id: 1, name: 'লক্ষ্মীর ভাণ্ডার', amount: 12000, score: 0.9 },
-    { id: 2, name: 'কৃষক বন্ধু', amount: 10000, score: 0.8 }
-  ];
-}
-
-function getFallbackScore(profile, scheme) {
-  let score = 0.5; // Base score
-  
-  if (profile.gender === 'মহিলা' && scheme.category?.includes('women')) score += 0.3;
-  if (profile.occupation === 'কৃষক' && scheme.category?.includes('farmer')) score += 0.4;
-  if (profile.age && profile.age > 60) score += 0.2;
-  
-  return Math.min(score, 1.0);
-}
-
-function parseUserProfile(text) {
-  const lower = text.toLowerCase();
-  
-  return {
-    age: (lower.match(/(\d{1,2})\s*(বছর|bochor|year)/i)?.[1] || '').toString(),
-    gender: lower.includes('মহিলা') || lower.includes('বিধবা') || lower.includes('মেয়ে') ? 'মহিলা' : 'পুরুষ',
-    location: (lower.match(/(মালদা|বর্ধমান|হাওড়া|কলকাতা|মুর্শিদাবাদ|নদিয়া)/i)?.[1] || 'WB'),
-    occupation: lower.includes('কৃষক') ? 'কৃষক' : lower.includes('ছাত্র') ? 'ছাত্র' : 'অন্যান্য',
-    rawText: text
-  };
+export function calcTotalBenefits(schemes) {
+  return schemes.reduce((sum, s) => sum + (s.amountNum || 0), 0);
 }
