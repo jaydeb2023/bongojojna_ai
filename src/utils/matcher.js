@@ -1,99 +1,97 @@
 import { SCHEMES } from '../data/schemes';
 
-// Known WB districts, blocks, panchayats (partial list for matching)
-const WB_LOCATIONS = [
-  'নগেন্দ্রপুর', 'বারুইপুর', 'ক্যানিং', 'ডায়মন্ড হারবার', 'মথুরাপুর',
-  'কলকাতা', 'মালদা', 'মুর্শিদাবাদ', 'বীরভূম', 'বর্ধমান', 'হাওড়া',
-  'হুগলি', 'নদিয়া', 'পুরুলিয়া', 'বাঁকুড়া', 'মেদিনীপুর', 'জলপাইগুড়ি',
-  'দার্জিলিং', 'কোচবিহার', 'দিনাজপুর', 'আসানসোল', 'দুর্গাপুর',
-  'খড়্গপুর', 'শিলিগুড়ি', 'বহরামপুর', 'কৃষ্ণনগর', 'বনগাঁ',
-];
+const SCHEME_LIST_FOR_AI = SCHEMES.map(s =>
+  `ID:${s.id} | নাম:${s.name} | ক্যাটাগরি:${s.category} | যোগ্যতা:${s.eligibility.join(', ')}`
+).join('\n');
 
-// Parse Bengali voice input and match schemes
-export function matchSchemes(transcript, profile = {}) {
-  if (!transcript && Object.keys(profile).length === 0) return [];
+export async function matchSchemesAI(transcript, apiKey, profile = {}) {
+  if (!transcript) return { schemes: [], message: null };
 
-  const text = (transcript || '').toLowerCase();
-  const matched = [];
+  const profileText = Object.keys(profile).length > 0
+    ? `লিঙ্গ=${profile.gender||'অজানা'}, বয়স=${profile.ageGroup||'অজানা'}, পেশা=${profile.occupation||'অজানা'}, জেলা=${profile.district||'অজানা'}`
+    : '';
 
-  // Detect if location-based query (panchayat/anchal/gram)
-  const isLocationQuery = 
-    text.includes('পঞ্চায়েত') ||
-    text.includes('অঞ্চল') ||
-    text.includes('গ্রাম') ||
-    text.includes('ব্লক') ||
-    text.includes('এলাকা') ||
-    WB_LOCATIONS.some(loc => text.includes(loc.toLowerCase()));
+  const systemPrompt = `তুমি পশ্চিমবঙ্গ সরকারি স্কিম বিশেষজ্ঞ।
 
-  SCHEMES.forEach(scheme => {
-    let score = 0;
+উপলব্ধ স্কিম:
+${SCHEME_LIST_FOR_AI}
 
-    // Location query → show ALL schemes available in WB
-    if (isLocationQuery) {
-      score += 2; // base score for all WB schemes
-    }
+শুধু এই JSON format এ উত্তর দাও, অন্য কিছু লিখবে না:
+{"matched_ids":[1,2],"understood":"১ লাইন বাংলায়","message":null}
 
-    // Gender matching
-    if (text.includes('মহিলা') || text.includes('মেয়ে') || text.includes('নারী') || profile.gender === 'মহিলা') {
-      if (scheme.category === 'মহিলা' || scheme.category === 'বিধবা') score += 3;
-    }
+যদি কোনো স্কিম না মেলে:
+{"matched_ids":[],"understood":"সারাংশ","message":"দুঃখিত, এই বিষয়ে আমাদের কাছে এখনো স্কিম নেই।"}
 
-    // Widow matching
-    if (text.includes('বিধবা') || profile.maritalStatus === 'বিধবা') {
-      if (scheme.category === 'বিধবা') score += 5;
-    }
+নিয়ম:
+- এলাকা/পঞ্চায়েত/অঞ্চল/গ্রাম/ব্লক/location → সব ID [1,2,3,4,5,6,7,8]
+- কৃষক/জমি/চাষ/ধান/ফসল → [2,3,5]
+- বিধবা → [4,5]
+- মহিলা/মেয়ে/নারী → [1,4,5]
+- ছাত্র/পড়া/স্কুল/কলেজ/বিশ্ববিদ্যালয় → [6,8,5]
+- বয়স্ক/বৃদ্ধ/৬০/৬৫/৭০ → [7,5]
+- স্বাস্থ্য/হাসপাতাল/চিকিৎসা/অসুস্থ → [5]
+- গরিব/বিপিএল → [1,2,4,5,7]
+- সবসময় ID 5 রাখো`;
 
-    // Farmer matching
-    if (text.includes('কৃষক') || text.includes('চাষ') || text.includes('জমি') || text.includes('ধান') || text.includes('ফসল') || profile.occupation === 'কৃষক') {
-      if (scheme.category === 'কৃষক') score += 4;
-    }
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        max_tokens: 200,
+        temperature: 0,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `"${transcript}" ${profileText}` }
+        ],
+      }),
+    });
 
-    // Student matching
-    if (text.includes('ছাত্র') || text.includes('ছাত্রী') || text.includes('পড়া') || text.includes('স্কুল') || text.includes('কলেজ') || text.includes('বিশ্ববিদ্যালয়') || profile.occupation === 'ছাত্র') {
-      if (scheme.category === 'ছাত্র') score += 4;
-    }
+    const data = await res.json();
+    const raw = data.choices[0].message.content.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(raw);
 
-    // Elder matching
-    if (text.includes('বৃদ্ধ') || text.includes('বয়স্ক') || text.includes('৬০') || text.includes('৬৫') || text.includes('৭০') || text.includes('বুড়ো') || profile.ageGroup === '৬০+') {
-      if (scheme.category === 'বয়স্ক') score += 4;
-    }
+    return {
+      schemes: SCHEMES
+        .filter(s => parsed.matched_ids?.includes(s.id))
+        .map(s => ({ ...s, score: 10 })),
+      understood: parsed.understood || null,
+      message: parsed.message || null,
+    };
 
-    // Health matching
-    if (text.includes('অসুস্থ') || text.includes('হাসপাতাল') || text.includes('চিকিৎসা') || text.includes('ডাক্তার') || text.includes('ওষুধ')) {
-      if (scheme.category === 'স্বাস্থ্য') score += 4;
-    }
-
-    // BPL / poor family
-    if (text.includes('গরিব') || text.includes('বিপিএল') || text.includes('bpl') || profile.income?.includes('BPL')) {
-      score += 1;
-    }
-
-    // Universal schemes (everyone can get)
-    if (scheme.id === 5) score += 1; // Swasthya Sathi for all WB residents
-
-    if (score > 0) {
-      matched.push({ ...scheme, score });
-    }
-  });
-
-  // If location query but no specific category matched, show all WB schemes
-  if (isLocationQuery && matched.length === 0) {
-    return SCHEMES.map(s => ({ ...s, score: 1 }));
+  } catch (err) {
+    console.error('OpenAI error:', err);
+    // API fail হলে keyword fallback
+    return {
+      schemes: fallbackMatch(transcript),
+      understood: null,
+      message: null,
+    };
   }
-
-  // Sort by score descending
-  return matched.sort((a, b) => b.score - a.score);
 }
 
-// Calculate total benefits
+// API fail হলে এটা কাজ করবে
+function fallbackMatch(transcript) {
+  const text = transcript.toLowerCase();
+  return SCHEMES.filter(s => {
+    if (text.includes('কৃষক') || text.includes('জমি')) return s.category === 'কৃষক';
+    if (text.includes('বিধবা')) return s.category === 'বিধবা';
+    if (text.includes('ছাত্র') || text.includes('পড়া')) return s.category === 'ছাত্র';
+    if (text.includes('বয়স্ক') || text.includes('বৃদ্ধ')) return s.category === 'বয়স্ক';
+    return s.id === 5;
+  }).map(s => ({ ...s, score: 5 }));
+}
+
 export function calcTotalBenefits(schemes) {
   return schemes.reduce((sum, s) => sum + s.amountNum, 0);
 }
 
-// Format number in Bengali
 export function formatBengaliNumber(num) {
   if (num >= 100000) return `${(num / 100000).toFixed(1)} লক্ষ`;
   if (num >= 1000) return `${(num / 1000).toFixed(1)} হাজার`;
   return num.toString();
 }
-

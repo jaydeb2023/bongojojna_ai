@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import VoiceButton, { Waveform } from '../components/VoiceButton';
 import SchemeCard from '../components/SchemeCard';
 import { useVoice } from '../hooks/useVoice';
-import { matchSchemes, calcTotalBenefits } from '../utils/matcher';
+import { matchSchemesAI, calcTotalBenefits } from '../utils/matcher';
 import { SCHEMES } from '../data/schemes';
 
 const DEMO_QUERIES = [
@@ -18,6 +18,8 @@ export default function HomePage() {
   const [hasSearched, setHasSearched] = useState(false);
   const [demoText, setDemoText] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
+  const [aiMessage, setAiMessage] = useState(null);
+  const [aiUnderstood, setAiUnderstood] = useState(null);
 
   // When transcript is ready, match schemes
   useEffect(() => {
@@ -26,17 +28,29 @@ export default function HomePage() {
     }
   }, [transcript, isListening]);
 
-  function processSearch(text) {
+  async function processSearch(text) {
     setIsProcessing(true);
-    setTimeout(() => {
-      const matched = matchSchemes(text);
-      // Always include Swasthya Sathi
-      const hasHealth = matched.find(s => s.id === 5);
-      if (!hasHealth) matched.push({ ...SCHEMES.find(s => s.id === 5), score: 1 });
-      setResults(matched.slice(0, 5));
+    try {
+      const apiKey = import.meta.env.VITE_OPENAI_KEY;
+      const { schemes, understood, message } = await matchSchemesAI(text, apiKey);
+      
+      // Always include Swasthya Sathi if relevant
+      const hasHealth = schemes.find(s => s.id === 5);
+      if (!hasHealth) {
+        const healthScheme = SCHEMES.find(s => s.id === 5);
+        if (healthScheme) schemes.push({ ...healthScheme, score: 1 });
+      }
+      
+      setResults(schemes.slice(0, 5));
+      setAiMessage(message);
+      setAiUnderstood(understood);
       setHasSearched(true);
+    } catch (error) {
+      console.error('Search error:', error);
+      setAiMessage('কিছু সমস্যা হয়েছে। আবার চেষ্টা করুন।');
+    } finally {
       setIsProcessing(false);
-    }, 800);
+    }
   }
 
   function tryDemo(query) {
@@ -50,6 +64,8 @@ export default function HomePage() {
     setResults([]);
     setHasSearched(false);
     setDemoText('');
+    setAiMessage(null);
+    setAiUnderstood(null);
   }
 
   const totalBenefit = calcTotalBenefits(results);
@@ -149,6 +165,18 @@ export default function HomePage() {
         {/* Results */}
         {hasSearched && !isProcessing && (
           <div className="mt-5">
+            {/* ✅ Change 4: AI Feedback */}
+            {aiUnderstood && (
+              <div className="bg-blue-50 rounded-2xl px-4 py-2 mb-3">
+                <p className="text-xs text-blue-600">🤖 আমি বুঝলাম: {aiUnderstood}</p>
+              </div>
+            )}
+            {aiMessage && (
+              <div className="bg-orange-50 border border-orange-200 rounded-2xl px-4 py-3 mb-3">
+                <p className="text-sm text-orange-800">⚠️ {aiMessage}</p>
+              </div>
+            )}
+
             {/* Summary banner */}
             <div className="bg-gradient-to-r from-saffron to-orange-500 text-white rounded-3xl p-4 mb-5 shadow-lg">
               <p className="text-white/80 text-sm mb-1">আপনি পেতে পারেন</p>
